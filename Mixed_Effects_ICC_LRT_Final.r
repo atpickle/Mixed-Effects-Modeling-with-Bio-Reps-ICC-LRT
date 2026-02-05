@@ -56,26 +56,63 @@ if ("Image" %in% names(process_data)) {
   warning("No 'Image' column found. Nested model will skip (1|Well:Image) term.")
 }
 
-# ----------------- MODELS (NESTED ONLY) -----------------
+# ----------------- CHECK BIOLOGICAL REPLICATE COUNT -----------------
 
-# Nested random effects model: (1|Biological_Rep) + (1|Biological_Rep:Well) + (1|Well:Image)
-if ("Image" %in% names(process_data)) {
+n_bioreps <- length(unique(process_data$Biological_Rep))
+cat(sprintf("\n=== BIOLOGICAL REPLICATE CHECK ===\n"))
+cat(sprintf("Number of biological replicates detected: %d\n", n_bioreps))
+cat(sprintf("Unique biological replicates: %s\n", 
+            paste(sort(unique(process_data$Biological_Rep)), collapse = ", ")))
+
+if (n_bioreps < 3) {
+  cat(sprintf("\n⚠️  WARNING: Only %d biological replicate(s) detected ⚠️\n", n_bioreps))
+  cat("Random effects variance estimation requires at least 3-5 replicates for reliability.\n")
+  cat("The model will use a simplified structure that does not include biological replicate effects.\n")
+  cat("Results should be interpreted with caution and are not suitable for biological inference.\n")
+  cat("RECOMMENDATION: Collect more biological replicates for robust analysis.\n\n")
+} else {
+  cat(sprintf("\n✓ Sufficient biological replicates detected (%d ≥ 3)\n", n_bioreps))
+  cat("Proceeding with full nested model structure.\n\n")
+}
+
+# ----------------- MODELS (ADAPTIVE BASED ON REPLICATE COUNT) -----------------
+
+# Nested random effects model - adapts based on available replicates
+if (n_bioreps >= 3 && "Image" %in% names(process_data)) {
+  # Full nested model (3+ biological replicates with images)
   NestedFit <- lmerTest::lmer(Results ~ Treatment + 
                                 (1 | Biological_Rep) + 
                                 (1 | Biological_Rep:Well) + 
                                 (1 | Well:Image),
                               data = process_data)
-  anova(NestedFit); summary(NestedFit)
-} else {
+  model_type <- "Full nested: (1|Biological_Rep) + (1|Biological_Rep:Well) + (1|Well:Image)"
+} else if (n_bioreps >= 3) {
+  # Nested model without image level (3+ biological replicates, no images)
   NestedFit <- lmerTest::lmer(Results ~ Treatment + 
                                 (1 | Biological_Rep) + 
                                 (1 | Biological_Rep:Well),
                               data = process_data)
-  anova(NestedFit); summary(NestedFit)
+  model_type <- "Nested: (1|Biological_Rep) + (1|Biological_Rep:Well)"
+} else if ("Image" %in% names(process_data)) {
+  # Simplified model for 1-2 replicates with images
+  NestedFit <- lmerTest::lmer(Results ~ Treatment + 
+                                (1 | Well) + 
+                                (1 | Well:Image),
+                              data = process_data)
+  model_type <- "⚠️ SIMPLIFIED: (1|Well) + (1|Well:Image) [insufficient biological replicates]"
+} else {
+  # Most basic model for 1-2 replicates without images
+  NestedFit <- lmerTest::lmer(Results ~ Treatment + 
+                                (1 | Well),
+                              data = process_data)
+  model_type <- "⚠️ SIMPLIFIED: (1|Well) [insufficient biological replicates]"
 }
 
-# Null model for nested structure (LRT)
-if ("Image" %in% names(process_data)) {
+cat(sprintf("Model structure: %s\n\n", model_type))
+anova(NestedFit); summary(NestedFit)
+
+# Null model for LRT - matching structure
+if (n_bioreps >= 3 && "Image" %in% names(process_data)) {
   NestedFit_null <- lme4::lmer(Results ~ 1 + 
                                  (1 | Biological_Rep) + 
                                  (1 | Biological_Rep:Well) + 
@@ -85,18 +122,36 @@ if ("Image" %in% names(process_data)) {
   NestedFit_full <- lme4::lmer(Results ~ Treatment + 
                                  (1 | Biological_Rep) + 
                                  (1 | Biological_Rep:Well) + 
+                                 (1 | Well:Image),
+                               data = process_data,
+                               REML = FALSE)
+} else if (n_bioreps >= 3) {
+  NestedFit_null <- lme4::lmer(Results ~ 1 + 
+                                 (1 | Biological_Rep) + 
+                                 (1 | Biological_Rep:Well),
+                               data = process_data,
+                               REML = FALSE)
+  NestedFit_full <- lme4::lmer(Results ~ Treatment + 
+                                 (1 | Biological_Rep) + 
+                                 (1 | Biological_Rep:Well),
+                               data = process_data,
+                               REML = FALSE)
+} else if ("Image" %in% names(process_data)) {
+  NestedFit_null <- lme4::lmer(Results ~ 1 + 
+                                 (1 | Well) + 
+                                 (1 | Well:Image),
+                               data = process_data,
+                               REML = FALSE)
+  NestedFit_full <- lme4::lmer(Results ~ Treatment + 
+                                 (1 | Well) + 
                                  (1 | Well:Image),
                                data = process_data,
                                REML = FALSE)
 } else {
-  NestedFit_null <- lme4::lmer(Results ~ 1 + 
-                                 (1 | Biological_Rep) + 
-                                 (1 | Biological_Rep:Well),
+  NestedFit_null <- lme4::lmer(Results ~ 1 + (1 | Well),
                                data = process_data,
                                REML = FALSE)
-  NestedFit_full <- lme4::lmer(Results ~ Treatment + 
-                                 (1 | Biological_Rep) + 
-                                 (1 | Biological_Rep:Well),
+  NestedFit_full <- lme4::lmer(Results ~ Treatment + (1 | Well),
                                data = process_data,
                                REML = FALSE)
 }
@@ -104,15 +159,15 @@ if ("Image" %in% names(process_data)) {
 # Transform: log
 process_data$logResults <- log(process_data$Results + 0.5)
 
-# Nested model with log transformation
+# Log-transformed model with same structure
 nested_formula <- formula(NestedFit)
 log_nested_formula <- update(nested_formula, logResults ~ .)
 
 LogNestedFit <- lmerTest::lmer(log_nested_formula, data = process_data)
 anova(LogNestedFit); summary(LogNestedFit)
 
-# Null model for log-transformed nested structure
-if ("Image" %in% names(process_data)) {
+# Null model for log-transformed data - matching structure
+if (n_bioreps >= 3 && "Image" %in% names(process_data)) {
   LogNestedFit_null <- lme4::lmer(logResults ~ 1 + 
                                     (1 | Biological_Rep) + 
                                     (1 | Biological_Rep:Well) + 
@@ -122,18 +177,36 @@ if ("Image" %in% names(process_data)) {
   LogNestedFit_full <- lme4::lmer(logResults ~ Treatment + 
                                     (1 | Biological_Rep) + 
                                     (1 | Biological_Rep:Well) + 
+                                    (1 | Well:Image),
+                                  data = process_data,
+                                  REML = FALSE)
+} else if (n_bioreps >= 3) {
+  LogNestedFit_null <- lme4::lmer(logResults ~ 1 + 
+                                    (1 | Biological_Rep) + 
+                                    (1 | Biological_Rep:Well),
+                                  data = process_data,
+                                  REML = FALSE)
+  LogNestedFit_full <- lme4::lmer(logResults ~ Treatment + 
+                                    (1 | Biological_Rep) + 
+                                    (1 | Biological_Rep:Well),
+                                  data = process_data,
+                                  REML = FALSE)
+} else if ("Image" %in% names(process_data)) {
+  LogNestedFit_null <- lme4::lmer(logResults ~ 1 + 
+                                    (1 | Well) + 
+                                    (1 | Well:Image),
+                                  data = process_data,
+                                  REML = FALSE)
+  LogNestedFit_full <- lme4::lmer(logResults ~ Treatment + 
+                                    (1 | Well) + 
                                     (1 | Well:Image),
                                   data = process_data,
                                   REML = FALSE)
 } else {
-  LogNestedFit_null <- lme4::lmer(logResults ~ 1 + 
-                                    (1 | Biological_Rep) + 
-                                    (1 | Biological_Rep:Well),
+  LogNestedFit_null <- lme4::lmer(logResults ~ 1 + (1 | Well),
                                   data = process_data,
                                   REML = FALSE)
-  LogNestedFit_full <- lme4::lmer(logResults ~ Treatment + 
-                                    (1 | Biological_Rep) + 
-                                    (1 | Biological_Rep:Well),
+  LogNestedFit_full <- lme4::lmer(logResults ~ Treatment + (1 | Well),
                                   data = process_data,
                                   REML = FALSE)
 }
@@ -192,21 +265,47 @@ save_model_summaries <- function() {
 
   sink(out_file)
   cat("================================================================\n")
-  cat("MIXED EFFECTS MODEL SUMMARIES (NESTED MODELS ONLY)\n")
+  cat("MIXED EFFECTS MODEL SUMMARIES\n")
   cat("================================================================\n\n")
+  
+  cat("=== DATA STRUCTURE ===\n")
+  cat(sprintf("Number of biological replicates: %d\n", n_bioreps))
+  cat(sprintf("Biological replicates: %s\n", 
+              paste(sort(unique(process_data$Biological_Rep)), collapse = ", ")))
+  
+  if (n_bioreps < 3) {
+    cat("\n⚠️  WARNING: INSUFFICIENT BIOLOGICAL REPLICATES ⚠️\n")
+    cat("Random effects variance estimation requires at least 3-5 replicates.\n")
+    cat("A simplified model structure was used (no biological replicate term).\n")
+    cat("Results should be interpreted with caution.\n")
+    cat("These results are NOT suitable for biological inference.\n\n")
+  } else {
+    cat(sprintf("\n✓ Sufficient biological replicates detected (%d ≥ 3)\n\n", n_bioreps))
+  }
   
   nested_formula <- formula(NestedFit)
   log_nested_formula <- formula(LogNestedFit)
   
   cat("=== NestedFit Model (Raw Data) ===\n")
   cat("Formula: "); print(nested_formula)
+  cat(sprintf("\nModel type: %s\n", model_type))
   cat("\nThis model accounts for:\n")
   cat("  - Treatment effects (fixed)\n")
-  cat("  - Nested random effects:\n")
-  cat("    * Biological replicate variation: (1|Biological_Rep)\n")
-  cat("    * Well within biological replicate: (1|Biological_Rep:Well)\n")
-  if ("Image" %in% names(process_data)) {
-    cat("    * Image within well: (1|Well:Image)\n")
+  
+  if (n_bioreps >= 3) {
+    cat("  - Nested random effects:\n")
+    cat("    * Biological replicate variation: (1|Biological_Rep)\n")
+    cat("    * Well within biological replicate: (1|Biological_Rep:Well)\n")
+    if ("Image" %in% names(process_data)) {
+      cat("    * Image within well: (1|Well:Image)\n")
+    }
+  } else {
+    cat("  - Random effects:\n")
+    cat("    * Well variation: (1|Well)\n")
+    if ("Image" %in% names(process_data)) {
+      cat("    * Image within well: (1|Well:Image)\n")
+    }
+    cat("\n  ⚠️  NOTE: Biological replicate effects not estimated (insufficient replicates)\n")
   }
   cat("\n")
   
@@ -221,7 +320,11 @@ save_model_summaries <- function() {
   cat("\n\nIntraclass Correlation Coefficient (ICC):\n")
   cat("----------------------------------------------------------------\n")
   cat(sprintf("ICC = %.4f\n", icc_nested))
-  cat("Interpretation: Proportion of total variance attributable to all random effects.\n")
+  if (n_bioreps >= 3) {
+    cat("Interpretation: Proportion of total variance attributable to all random effects.\n")
+  } else {
+    cat("⚠️  Interpretation limited: ICC reflects technical variation only (not biological).\n")
+  }
   
   cat("\n\nLikelihood Ratio Test (LRT) - Treatment Effect:\n")
   cat("----------------------------------------------------------------\n")
@@ -232,7 +335,12 @@ save_model_summaries <- function() {
   cat("Formula: "); print(log_nested_formula)
   cat("\nThis model accounts for:\n")
   cat("  - Treatment effects (fixed)\n")
-  cat("  - Nested random effects with log-transformed response\n")
+  if (n_bioreps >= 3) {
+    cat("  - Nested random effects with log-transformed response\n")
+  } else {
+    cat("  - Random effects with log-transformed response\n")
+    cat("  ⚠️  NOTE: Simplified structure due to insufficient biological replicates\n")
+  }
   cat("  - Transform applied: logResults = log(Results + 0.5)\n\n")
   
   cat("ANOVA:\n"); print(anova(LogNestedFit))
@@ -246,7 +354,11 @@ save_model_summaries <- function() {
   cat("\n\nIntraclass Correlation Coefficient (ICC):\n")
   cat("----------------------------------------------------------------\n")
   cat(sprintf("ICC = %.4f\n", icc_log_nested))
-  cat("Interpretation: Proportion of total variance attributable to all random effects.\n")
+  if (n_bioreps >= 3) {
+    cat("Interpretation: Proportion of total variance attributable to all random effects.\n")
+  } else {
+    cat("⚠️  Interpretation limited: ICC reflects technical variation only (not biological).\n")
+  }
   
   cat("\n\nLikelihood Ratio Test (LRT) - Treatment Effect:\n")
   cat("----------------------------------------------------------------\n")
@@ -257,16 +369,34 @@ save_model_summaries <- function() {
   cat("----------------------------------------------------------------\n")
   cat("NestedFit uses:    "); cat(deparse(nested_formula), "\n")
   cat("LogNestedFit uses: "); cat(deparse(log_nested_formula), "\n")
-  cat("\nBoth models include hierarchical random effects structure:\n")
-  cat("  Biological_Rep > Biological_Rep:Well")
-  if ("Image" %in% names(process_data)) {
-    cat(" > Well:Image")
-  }
-  cat("\n\nThis structure properly accounts for:\n")
-  cat("  1. Between-biological-replicate variation\n")
-  cat("  2. Between-well variation within the same biological replicate\n")
-  if ("Image" %in% names(process_data)) {
-    cat("  3. Between-image variation within the same well\n")
+  
+  if (n_bioreps >= 3) {
+    cat("\nBoth models include hierarchical random effects structure:\n")
+    cat("  Biological_Rep > Biological_Rep:Well")
+    if ("Image" %in% names(process_data)) {
+      cat(" > Well:Image")
+    }
+    cat("\n\nThis structure properly accounts for:\n")
+    cat("  1. Between-biological-replicate variation\n")
+    cat("  2. Between-well variation within the same biological replicate\n")
+    if ("Image" %in% names(process_data)) {
+      cat("  3. Between-image variation within the same well\n")
+    }
+  } else {
+    cat("\n⚠️  SIMPLIFIED MODEL STRUCTURE ⚠️\n")
+    cat("Due to insufficient biological replicates, the model uses:\n")
+    cat("  Well")
+    if ("Image" %in% names(process_data)) {
+      cat(" > Well:Image")
+    }
+    cat("\n\nThis structure accounts for:\n")
+    cat("  1. Between-well technical variation\n")
+    if ("Image" %in% names(process_data)) {
+      cat("  2. Between-image variation within wells\n")
+    }
+    cat("\n⚠️  IMPORTANT: This does NOT capture biological variation!\n")
+    cat("Results reflect technical replication only.\n")
+    cat("COLLECT MORE BIOLOGICAL REPLICATES for valid biological inference.\n")
   }
   cat("\n")
   
